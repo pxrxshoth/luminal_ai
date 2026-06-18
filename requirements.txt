@@ -13,3 +13,6 @@ langchain-openai
 langchain-community
 tiktoken
 python-dotenv
+structlog
+redis
+celery

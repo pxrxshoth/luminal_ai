@@ -26,6 +26,40 @@ services:
       - neo4j_data:/data
     restart: unless-stopped
 
+  redis:
+    image: redis:alpine
+    container_name: luminal_redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: luminal_frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: luminal_backend
+    ports:
+      - "8000:8000"
+    environment:
+      - POSTGRES_URL=postgresql://luminal:luminal@postgres:5432/luminal_db
+      - NEO4J_URI=bolt://neo4j:7687
+    depends_on:
+      - postgres
+      - neo4j
+      - redis
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   neo4j_data:
