@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: luminal_postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: luminal
+      POSTGRES_PASSWORD: luminal
+      POSTGRES_DB: luminal_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  neo4j:
+    image: neo4j:5
+    container_name: luminal_neo4j
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      NEO4J_AUTH: neo4j/password
+    volumes:
+      - neo4j_data:/data
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  neo4j_data:

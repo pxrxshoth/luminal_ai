@@ -1,0 +1,15 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+psycopg2-binary
+pydantic
+pydantic-settings
+neo4j
+faiss-cpu
+pinecone-client
+openai
+langchain
+langchain-openai
+langchain-community
+tiktoken
+python-dotenv
