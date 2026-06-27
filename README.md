@@ -1,8 +1,8 @@
 <div align="center">
   <img src="https://raw.githubusercontent.com/lucide-icons/lucide/main/icons/brain-circuit.svg" width="80" alt="Luminal AI Logo" />
   <h1>LUMINAL AI</h1>
-  <p><strong>Intelligent RAG & Graph-Based Learning System</strong></p>
-  <p>Generative AI • Knowledge Graphs • Semantic Search • NLP Orchestration</p>
+  <p><strong>RAG &amp; Graph-Based Question-Answering System</strong></p>
+  <p>FastAPI · LangChain · FAISS · Neo4j · PostgreSQL · React</p>
   <p>
     <img src="https://img.shields.io/badge/Python-3.10%2B-blue" alt="Python Version" />
     <img src="https://img.shields.io/badge/FastAPI-0.100%2B-green" alt="FastAPI Version" />
@@ -16,124 +16,210 @@
 
 ## Overview
 
-Luminal AI is an enterprise-grade **Generative AI knowledge extraction and reasoning system**. It is designed to transform static notes and unstructured text into a highly interactive assistant capable of deep multi-mode reasoning, active questioning, and automated knowledge gap detection.
+Luminal AI is a Python backend that lets you ingest text documents and then ask natural-language questions against them. It combines:
 
-Initially conceived as an advanced educational orchestration layer, Luminal AI leverages a **Hybrid RAG** (Retrieval-Augmented Generation) engine that grounds Large Language Models in both semantic vector spaces and explicit structural relationships.
+- **FAISS vector search** – documents are chunked, embedded with OpenAI's `text-embedding-3-large`, and stored in an in-memory FAISS index for similarity search.
+- **Neo4j graph storage** – if the caller supplies explicit entity relationships at ingest time, those are merged into a Neo4j graph and later used to augment the answer context.
+- **LLM generation** – GPT-4o classifies the query intent; GPT-4-turbo generates a streamed answer using the retrieved context.
+- **Interaction logging** – every query/response pair is stored in PostgreSQL.
+- **Gap detection** – a separate endpoint accepts the last *n* interactions and calls GPT-4 to generate a targeted follow-up question about the topic.
 
-### Key Achievements
-- **Hybrid Contextual RAG**: Reduced LLM hallucination rates significantly by combining dense vector retrieval (FAISS/Pinecone) with explicit graph traversals (Neo4j).
-- **Automated Knowledge Ingestion**: Sustained high-throughput automated preprocessing pipelines featuring dynamic recursive text chunking and instantaneous embedding generation.
-- **Intent-Driven Orchestration**: Developed an advanced multi-agent orchestration layer that successfully parses user intent to route queries between conceptual synthesis and factual retrieval.
-- **Active Gap Detection Engine**: Engineered an evaluation system capable of actively scanning user interaction history to generate targeted follow-up questions, reinforcing user understanding.
+A React/TypeScript frontend (Vite) is included and served as a separate Docker container.
 
 ---
 
 ## System Architecture
 
-The architecture relies on loosely coupled microservices designed for scalable knowledge processing and rapid reasoning inference.
-
-```mermaid
-graph LR
-    subgraph Knowledge Ingestion
-        Doc[Static Notes<br/>Raw Text] -->|Process| IP[Ingestion Pipeline<br/>Recursive Chunking]
-        IP -->|Extract Vectors| V[(Vector Store<br/>FAISS/Pinecone)]
-        IP -->|Extract Relations| G[(Graph DB<br/>Neo4j)]
-    end
-
-    subgraph Orchestration & Reasoning
-        UI[User Query<br/>Intent Parsing] -->|Route| ORC[LLM Orchestrator<br/>LangChain]
-        ORC -->|Semantic Search| V
-        ORC -->|Graph Traversal| G
-        ORC -->|Synthesize| LLM[(Generative AI<br/>GPT-4)]
-    end
-
-    subgraph Logging & Evaluation
-        LLM -->|Response| UI
-        LLM -->|Interaction Data| PG[(Relational DB<br/>PostgreSQL)]
-        PG -->|Analyze| EVAL[Gap Detection Engine<br/>Targeted Questioning]
-        EVAL -->|Active Feedback| UI
-    end
-    
-    style IP fill:#1f2937,stroke:#3b82f6,color:#fff
-    style V fill:#065f46,stroke:#10b981,color:#fff
-    style G fill:#b45309,stroke:#f59e0b,color:#fff
-    style ORC fill:#4c1d95,stroke:#8b5cf6,color:#fff
-    style LLM fill:#be185d,stroke:#f43f5e,color:#fff
-    style PG fill:#0f172a,stroke:#38bdf8,color:#fff
-    style EVAL fill:#1e40af,stroke:#60a5fa,color:#fff
 ```
+┌─────────────────────────────────────────────────────────────────┐
+│  Client (React / Vite)  ──►  FastAPI backend (:8000)            │
+│                                                                  │
+│  POST /api/v1/ingest                                             │
+│    └─► AsyncIngestionQueue (asyncio, 3 workers)                  │
+│         ├─► RecursiveCharacterTextSplitter → chunks              │
+│         ├─► FAISS in-memory index (OpenAI embeddings)            │
+│         └─► Neo4j batch merge  (only if relations supplied)      │
+│                                                                  │
+│  POST /api/v1/query/stream                                       │
+│    └─► SemanticRouter (GPT-4o) → FACTUAL_RETRIEVAL |             │
+│                                   RELATIONAL_SYNTHESIS |         │
+│                                   GENERAL_CHAT                   │
+│         ├─► FAISS similarity search  (k=5)                       │
+│         │    + keyword re-rank (term-overlap score)              │
+│         ├─► Neo4j subgraph query  (depth=2, if concept given)    │
+│         └─► GPT-4-turbo streamed response (SSE)                  │
+│              └─► PostgreSQL interaction_logs                      │
+│                                                                  │
+│  POST /api/v1/evaluate                                           │
+│    └─► GPT-4 Socratic question from last 3 interactions          │
+└─────────────────────────────────────────────────────────────────┘
+
+Infrastructure (docker-compose):
+  postgres:15  ·  neo4j:5  ·  redis:alpine  ·  backend  ·  frontend
+```
+
+---
 
 ## Core Components
 
-### 1. Ingestion & Preprocessing Pipeline (`src/services/ingestion.py`)
-A highly automated NLP data pipeline. It utilizes recursive character chunking and semantic extraction to transform raw documents. Extracted entities are routed to the Vector Store for semantic similarity, while their complex relational topologies are mapped into the Graph Database.
+### 1. Ingestion Pipeline — [`src/services/ingestion.py`](src/services/ingestion.py)
 
-### 2. Hybrid RAG Engine (`src/services/rag.py`)
-The reasoning core of Luminal AI. When a query is received, this engine performs a dual-retrieval: fetching top-k semantically relevant chunks from **FAISS/Pinecone**, while simultaneously querying **Neo4j** for adjacent conceptual nodes to provide a deep, relationship-aware context prompt to the LLM.
+- Uses `asyncio.Queue` (max 100 items) and 3 background worker tasks.
+- Splits text with LangChain's `RecursiveCharacterTextSplitter` (chunk size 1 200 chars, overlap 250).
+- Embeds chunks and adds them to an **in-memory FAISS index** via `AsyncVectorStoreManager`. The index is not persisted to disk — it is lost on restart.
+- Entity extraction is **regex-based**: capitalised multi-word phrases (e.g., `[A-Z][a-z]+ ...`) are treated as candidate entities. No NLP NER model is used.
+- Relationships (edges in Neo4j) are only created when the caller explicitly provides a `relations` list in the request body. They are not inferred from text automatically.
 
-### 3. Evaluation & Gap Detection (`src/services/evaluation.py`)
-An active learning module that analyzes the historical interaction logs stored in **PostgreSQL**. By evaluating the user's intent and conceptual coverage, it proactively generates targeted questions to test understanding and identify blind spots.
+### 2. Vector Store — [`src/db/vector_store.py`](src/db/vector_store.py)
 
-### 4. FastAPI Backend Microservice (`src/api/routes.py`, `src/main.py`)
-A highly concurrent and scalable asynchronous **FastAPI** backend that acts as the entry point for all reasoning, ingestion, and evaluation workloads. Employs structured logging for rigorous prompt debugging and system monitoring.
+- Wraps LangChain's `FAISS` with async helpers.
+- `async_hybrid_search` fetches `2k` dense neighbours, then re-ranks by plain keyword term-overlap, and returns the top `k`. It is **not** a true sparse+dense hybrid (no BM25 or Pinecone sparse index).
+- Pinecone credentials are present in the config but **no Pinecone code path is implemented**.
+
+### 3. RAG Agent — [`src/services/rag.py`](src/services/rag.py)
+
+- `SemanticRouter` sends the query to GPT-4o with a few-shot prompt to get one of three intent labels.
+- `AsyncHybridRAGAgent._gather_context` fans out FAISS search and (optionally) a Neo4j Cypher subgraph query concurrently via `asyncio.gather`.
+- Streams the GPT-4-turbo response as Server-Sent Events. The intent label and retrieved context are injected into the system prompt.
+
+### 4. Neo4j Client — [`src/db/neo4j_client.py`](src/db/neo4j_client.py)
+
+- Async driver with a connection pool (max 50 connections).
+- `extract_subgraph` traverses up to depth 2 from a named `Concept` node and returns nodes + edges (max 50 nodes).
+- `batch_merge_entities` uses `MERGE` for nodes and `apoc.create.relationship` for edges inside a single transaction — **requires APOC plugin** to be installed in Neo4j.
+
+### 5. Evaluation — [`src/services/evaluation.py`](src/services/evaluation.py)
+
+- Accepts an `interaction_history` list and a `current_topic` string.
+- Formats the **last 3** entries from the history into a prompt and asks GPT-4 to generate one Socratic follow-up question.
+- Does not query PostgreSQL; the caller is responsible for supplying the history.
+
+### 6. FastAPI Backend — [`src/main.py`](src/main.py) · [`src/api/routes.py`](src/api/routes.py)
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/health` | `GET` | Liveness check |
+| `/api/v1/ingest` | `POST` | Queue a document for background processing |
+| `/api/v1/query/stream` | `POST` | Stream an LLM answer (SSE) |
+| `/api/v1/evaluate` | `POST` | Generate a targeted follow-up question |
+
+- Per-request logging middleware attaches a UUID and measures latency in milliseconds.
+- `InteractionLog` rows are written to PostgreSQL after each streamed response. The `intent` field is currently hardcoded to `"unknown"` in the route handler.
+
+### 7. Frontend — [`frontend/`](frontend/)
+
+- Vite + React + TypeScript project with Tailwind CSS.
+- Runs on port 3000 inside Docker and proxies API calls to the backend container.
 
 ---
 
 ## Quickstart
 
 ### Prerequisites
-- Docker & Docker Compose
-- Python 3.10+
-- OpenAI API Key
 
-### Setup the Environment
+- Docker & Docker Compose
+- Python 3.10+ (for local development without Docker)
+- OpenAI API key
+- Neo4j with the **APOC** plugin enabled (required for relationship creation)
+
+### Environment Setup
 
 ```bash
 # 1. Clone the repository
 git clone https://github.com/yourusername/luminal-ai.git
 cd luminal-ai
 
-# 2. Activate the virtual environment
-# Windows
+# 2. Create and activate a virtual environment
 python -m venv venv
+# Windows
 .\venv\Scripts\activate
-# Linux/Mac
-python3 -m venv venv
+# Linux / macOS
 source ./venv/bin/activate
 
-# 3. Install requirements
+# 3. Install dependencies
 pip install -r requirements.txt
 
 # 4. Configure environment variables
 cp .env.example .env
-# Edit .env to add your OPENAI_API_KEY, PINECONE_API_KEY, etc.
+# Edit .env — required keys:
+#   OPENAI_API_KEY
+#   NEO4J_URI / NEO4J_USER / NEO4J_PASSWORD
+#   POSTGRES_URL
 ```
 
-### Running the System Locally
+### Running with Docker Compose
 
-1. **Start the Database Infrastructure (Postgres & Neo4j)**
 ```bash
+# Start all services (postgres, neo4j, redis, backend, frontend)
 docker-compose up -d
 ```
 
-2. **Start the Application Backend**
+- Backend API: http://localhost:8000
+- Frontend UI: http://localhost:3000
+- Neo4j Browser: http://localhost:7474
+
+### Running the Backend Locally
+
 ```bash
 uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 ---
 
-## Performance & SLAs
+## Known Limitations
 
-| Metric | Target SLA | Expected System Range |
-|--------|------------|-----------------------|
-| Semantic Retrieval Latency | < 50ms | 20-35ms |
-| Graph Traversal Latency | < 100ms | 40-70ms |
-| E2E Generation Latency (LLM) | < 2000ms | 1200-1800ms |
-| Chunking & Ingestion Rate | > 5MB/s | 12MB/s |
+| Area | Limitation |
+|---|---|
+| FAISS index | In-memory only — all embeddings are lost on restart. Add `index.faiss` save/load calls to persist data. |
+| Pinecone | Configuration keys are present but Pinecone is not used in any code path. |
+| Entity extraction | Regex-based (capitalised phrases). Not an NLP model — noisy for general text. |
+| Graph relations | Only created when explicitly provided by the caller. No automatic relation extraction from text. |
+| Intent logging | The `intent` column in PostgreSQL is always stored as `"unknown"` (see `routes.py` line 52). |
+| Evaluation history | The gap-detection endpoint uses only the last 3 messages passed in the request; it does not query the database. |
+| APOC dependency | `batch_merge_entities` calls `apoc.create.relationship`, which requires the APOC plugin. Without it, relationship creation will fail. |
+| Redis / Celery | Both are declared as dependencies and listed in `requirements.txt` but are not used in the application code. |
 
 ---
 
-<div align="center">
-  <i>Engineered for next-generation interactive learning and contextual reasoning.</i>
-</div>
+## Project Structure
+
+```
+luminal-ai/
+├── docker-compose.yaml
+├── requirements.txt
+├── frontend/               # Vite + React + TypeScript UI
+└── src/
+    ├── main.py             # FastAPI app, middleware, lifespan
+    ├── api/
+    │   └── routes.py       # API endpoints
+    ├── core/
+    │   ├── config.py       # Pydantic settings
+    │   ├── exceptions.py   # Custom exception classes
+    │   ├── llm.py
+    │   └── logger.py       # Structlog configuration
+    ├── db/
+    │   ├── neo4j_client.py # Async Neo4j driver wrapper
+    │   ├── postgres.py     # SQLAlchemy models & session
+    │   └── vector_store.py # FAISS + OpenAI embeddings wrapper
+    └── services/
+        ├── evaluation.py   # GPT-4 Socratic question generation
+        ├── ingestion.py    # Async queue + chunking + indexing
+        └── rag.py          # Intent router + context gathering + LLM streaming
+```
+
+---
+
+## Dependencies
+
+| Package | Purpose |
+|---|---|
+| `fastapi` + `uvicorn` | Async HTTP server |
+| `langchain` + `langchain-openai` + `langchain-community` | LLM chains, FAISS wrapper, text splitter |
+| `openai` | OpenAI API client |
+| `faiss-cpu` | In-memory vector index |
+| `neo4j` | Async graph database driver |
+| `sqlalchemy` + `psycopg2-binary` | PostgreSQL ORM |
+| `pydantic` + `pydantic-settings` | Request validation & configuration |
+| `structlog` | Structured JSON logging |
+| `tiktoken` | Token counting for chunking |
+| `redis` + `celery` | Declared but currently unused |
