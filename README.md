@@ -166,20 +166,6 @@ uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
 
 ---
 
-## Known Limitations
-
-| Area | Limitation |
-|---|---|
-| FAISS index | In-memory only — all embeddings are lost on restart. Add `index.faiss` save/load calls to persist data. |
-| Pinecone | Configuration keys are present but Pinecone is not used in any code path. |
-| Entity extraction | Regex-based (capitalised phrases). Not an NLP model — noisy for general text. |
-| Graph relations | Only created when explicitly provided by the caller. No automatic relation extraction from text. |
-| Intent logging | The `intent` column in PostgreSQL is always stored as `"unknown"` (see `routes.py` line 52). |
-| Evaluation history | The gap-detection endpoint uses only the last 3 messages passed in the request; it does not query the database. |
-| APOC dependency | `batch_merge_entities` calls `apoc.create.relationship`, which requires the APOC plugin. Without it, relationship creation will fail. |
-| Redis / Celery | Both are declared as dependencies and listed in `requirements.txt` but are not used in the application code. |
-
----
 
 ## Project Structure
 
